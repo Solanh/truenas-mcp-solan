@@ -127,7 +127,7 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 		newStatus = TaskStatusCompleted
 		statusMessage = "Job completed successfully"
 		if result, ok := job["result"]; ok {
-			task.Result = result
+			task.Result = RedactValue(result, "result")
 		}
 
 	case "FAILED":
@@ -201,7 +201,7 @@ func (p *Poller) updateTaskFromStatus(task *Task, status map[string]interface{})
 	if task.Status != newStatus || task.StatusMessage != statusMessage {
 		task.Status = newStatus
 		task.StatusMessage = statusMessage
-		task.Result = status
+		task.Result = RedactValue(status, "result")
 		p.store.Update(task)
 	}
 }

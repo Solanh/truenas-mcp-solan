@@ -77,7 +77,7 @@ func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jo
 		OperationType: OperationTypeJob,
 		JobID:         &jobID,
 		ToolName:      toolName,
-		Arguments:     args,
+		Arguments:     RedactArguments(args),
 	}
 
 	if err := m.store.Add(task); err != nil {
@@ -99,7 +99,7 @@ func (m *Manager) CreateStatusTask(toolName string, args map[string]interface{},
 		OperationType: OperationTypeStatus,
 		StatusMethod:  statusMethod,
 		ToolName:      toolName,
-		Arguments:     args,
+		Arguments:     RedactArguments(args),
 	}
 
 	if err := m.store.Add(task); err != nil {

@@ -662,6 +662,112 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 		Handler: handleQueryVMs,
 	}
 
+	// VM lifecycle and installation tools
+	r.tools["find_vm_iso"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "find_vm_iso",
+			Description: "Find the first Ubuntu ISO in a TrueNAS directory using deterministic lexicographic ordering. Read-only.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"directory": map[string]interface{}{"type": "string", "description": "Optional absolute TrueNAS directory (default: /mnt/Databases/vms)"},
+				},
+			},
+		},
+		Handler: handleFindVMISO,
+	}
+
+	r.tools["create_vm"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "create_vm",
+			Description: "Create a TrueNAS VM with a ZFS-backed sparse disk, installation ISO, display device, and VirtIO network. Supports dry_run; partial setup is rolled back on device failure. Does not install the guest OS or expose private keys.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name":          map[string]interface{}{"type": "string", "description": "VM name (default: Codex VM)"},
+					"description":   map[string]interface{}{"type": "string"},
+					"iso_path":      map[string]interface{}{"type": "string", "description": "Optional absolute ISO path; otherwise the first Ubuntu ISO in iso_directory is selected"},
+					"iso_directory": map[string]interface{}{"type": "string", "description": "ISO directory (default: /mnt/Databases/vms)"},
+					"vcpus":         map[string]interface{}{"type": "integer", "default": defaultVMVCPUs, "minimum": 1, "maximum": 16},
+					"memory_mb":     map[string]interface{}{"type": "integer", "default": defaultVMMemoryMB, "minimum": 20},
+					"disk_size_gib": map[string]interface{}{"type": "integer", "default": defaultVMDiskGiB, "minimum": 1},
+					"disk_name":     map[string]interface{}{"type": "string", "description": "Optional ZFS volume name below Databases/vms"},
+					"nic_attach":    map[string]interface{}{"type": "string", "default": defaultVMNICAttach, "description": "TrueNAS bridge/interface attachment (default: br0)"},
+					"autostart":     map[string]interface{}{"type": "boolean", "default": false},
+					"start":         map[string]interface{}{"type": "boolean", "default": false},
+					"dry_run":       map[string]interface{}{"type": "boolean", "default": false},
+				},
+			},
+		},
+		Handler: handleCreateVM,
+	}
+
+	r.tools["start_vm"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "start_vm",
+			Description: "Start a TrueNAS VM by ID. Supports dry_run and does not enable memory overcommit unless explicitly requested.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"vm_id":      map[string]interface{}{"type": "integer", "description": "Required VM ID"},
+					"overcommit": map[string]interface{}{"type": "boolean", "default": false},
+					"dry_run":    map[string]interface{}{"type": "boolean", "default": false},
+				},
+				"required": []string{"vm_id"},
+			},
+		},
+		Handler: handleStartVM,
+	}
+
+	r.tools["delete_vm_zvol"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "delete_vm_zvol",
+			Description: "Delete one exact, verified VOLUME zvol below Databases/vms. Intended for cleaning up orphaned VM disks; supports dry_run.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"zvol_name": map[string]interface{}{"type": "string", "description": "Exact zvol path below Databases/vms"},
+					"dry_run":   map[string]interface{}{"type": "boolean", "default": false},
+				},
+				"required": []string{"zvol_name"},
+			},
+		},
+		Handler: handleDeleteVMZvol,
+	}
+
+	r.tools["get_vm_console"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "get_vm_console",
+			Description: "Get a TrueNAS VM console connection descriptor for interactive guest installation. Treat the returned descriptor as sensitive.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"vm_id": map[string]interface{}{"type": "integer", "description": "Required VM ID"},
+				},
+				"required": []string{"vm_id"},
+			},
+		},
+		Handler: handleGetVMConsole,
+	}
+
+	r.tools["vm_ssh_test"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "vm_ssh_test",
+			Description: "Run a fixed non-interactive SSH connectivity probe against a guest. Executes only 'printf codex-ssh-ok'; never accepts arbitrary guest commands or returns private-key contents.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"host":          map[string]interface{}{"type": "string", "description": "Guest hostname or IP address"},
+					"username":      map[string]interface{}{"type": "string", "description": "Guest Unix username"},
+					"identity_file": map[string]interface{}{"type": "string", "description": "Absolute path to a local private SSH key; key contents are never read into the response"},
+					"known_hosts":   map[string]interface{}{"type": "string", "description": "Optional absolute known_hosts file"},
+				},
+				"required": []string{"host", "username", "identity_file"},
+			},
+		},
+		Handler: handleVMSSHTest,
+	}
+
 	// Dataset creation (write operation)
 	r.tools["create_dataset"] = Tool{
 		Definition: mcp.Tool{
@@ -1171,6 +1277,31 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 		Handler: handleQueryApps,
 	}
 
+	// Read app lifecycle log
+	r.tools["get_app_lifecycle_log"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "get_app_lifecycle_log",
+			Description: "Read the TrueNAS app lifecycle log for diagnosing failed application installs, starts, stops, and upgrades. Read-only; requires FULL_ADMIN because it uses filesystem.get on /var/log/app_lifecycle.log.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional app name to filter log lines, for example 'meshcentral'",
+					},
+					"tail_lines": map[string]interface{}{
+						"type":        "integer",
+						"description": "Number of matching lines to return from the end (1-2000, default 200)",
+						"default":     200,
+						"minimum":     1,
+						"maximum":     2000,
+					},
+				},
+			},
+		},
+		Handler: handleGetAppLifecycleLog,
+	}
+
 	// Upgrade app
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
@@ -1644,6 +1775,9 @@ Returns task_id for tracking progress with tasks_get.
 						"description": "Remove container images (default: false)",
 						"default":     false,
 					},
+					"remove_ix_volumes":       map[string]interface{}{"type": "boolean", "description": "Remove TrueNAS-managed app volumes (default: false; host-path datasets are never removed by this tool)", "default": false},
+					"force_remove_ix_volumes": map[string]interface{}{"type": "boolean", "description": "Force removal of TrueNAS-managed volumes containing data (default: false)", "default": false},
+					"force_remove_custom_app": map[string]interface{}{"type": "boolean", "description": "Force removal when deleting a custom app with invalid Compose YAML (default: false)", "default": false},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Preview deletion without executing (default: false)",
@@ -1767,6 +1901,12 @@ Returns task_id for tracking progress with tasks_get.
 		},
 		Handler: r.handleTasksGet,
 	}
+	registerCustomAppTools(r)
+	registerAppContainerStatus(r)
+	registerContainerLogTools(r)
+	registerRegistryTools(r)
+	registerFilesystemTools(r)
+	registerNetworkQueryTools(r)
 }
 
 func (r *Registry) ListTools() []mcp.Tool {

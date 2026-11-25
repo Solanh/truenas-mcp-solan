@@ -42,6 +42,10 @@ This document provides example natural language queries you can use with TrueNAS
 - "What's the memory allocation for my VMs?"
 - "Show me details for the homeassistant VM"
 - "Which VMs are stopped?"
+- "Preview creating a 5-vCPU, 16 GiB, 256 GiB Codex VM from the first Ubuntu ISO"
+- "Create the Codex VM and attach the ISO from /mnt/Databases/vms"
+- "Start VM 3 and give me its console descriptor"
+- "Test SSH to the VM using my existing key"
 
 ## Performance
 
@@ -66,6 +70,18 @@ This document provides example natural language queries you can use with TrueNAS
 - "Upgrade the plex app to the latest version"
 - "Delete the jellyfin app (show me what will happen first)"
 - "Remove the plex app and its container images"
+
+### Custom Apps from YAML
+
+Use `validate_custom_app` first, then `create_custom_app` with the exact YAML intended for the TrueNAS Web UI custom-app form. The YAML is passed to TrueNAS as `custom_compose_config_string`; safety findings are warnings, while malformed YAML and invalid app names are rejected.
+
+- "Validate this Docker Compose YAML for a custom app and check port conflicts"
+- "Create a custom app called uptime from this Compose YAML"
+- "Update the uptime custom app with this new Compose YAML"
+- "Show diagnostics for the uptime custom app"
+- "Show the last 100 sanitized log lines for the scale-secrets-runner app"
+- "Wait up to 30 seconds for the runner container to log Listening for Jobs"
+- "Redeploy the uptime app and track the task"
 
 ### App Catalog & Installation
 - "Search for media server apps in the catalog"

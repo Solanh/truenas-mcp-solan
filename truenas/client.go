@@ -4,7 +4,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +32,9 @@ type Client struct {
 	// pending maps request ID -> response channel for concurrent request multiplexing
 	pendingMu sync.Mutex
 	pending   map[string]chan *responseResult
+
+	subscriptionsMu sync.Mutex
+	subscriptions   map[*Subscription]struct{}
 
 	requestID atomic.Uint64
 }
@@ -57,10 +63,12 @@ type APIRequest struct {
 }
 
 type APIResponse struct {
-	ID     string          `json:"id"`
-	Msg    string          `json:"msg"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *APIError       `json:"error,omitempty"`
+	ID         string                 `json:"id"`
+	Msg        string                 `json:"msg"`
+	Result     json.RawMessage        `json:"result,omitempty"`
+	Error      *APIError              `json:"error,omitempty"`
+	Collection string                 `json:"collection,omitempty"`
+	Fields     map[string]interface{} `json:"fields,omitempty"`
 }
 
 type APIError struct {
@@ -77,10 +85,11 @@ func NewClient(endpoint, apiKey string, tlsConfig *tls.Config) (*Client, error) 
 		return nil, fmt.Errorf("apiKey cannot be empty")
 	}
 	return &Client{
-		endpoint:  endpoint,
-		apiKey:    apiKey,
-		tlsConfig: tlsConfig,
-		pending:   make(map[string]chan *responseResult),
+		endpoint:      endpoint,
+		apiKey:        apiKey,
+		tlsConfig:     tlsConfig,
+		pending:       make(map[string]chan *responseResult),
+		subscriptions: make(map[*Subscription]struct{}),
 	}, nil
 }
 
@@ -164,7 +173,9 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 		var resp APIResponse
 		if err := conn.ReadJSON(&resp); err != nil {
 			// Connection dropped - fail all pending requests
-			c.failAllPending(fmt.Errorf("failed to read response: %w", err))
+			connectionErr := fmt.Errorf("failed to read response: %w", err)
+			c.failAllPending(connectionErr)
+			c.failSubscriptions(connectionErr)
 
 			// Reset connection state if it's still this connection
 			c.connMu.Lock()
@@ -176,9 +187,16 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 			return
 		}
 
-		respJSON, _ := json.Marshal(resp)
-		log.Printf("Received response: %s", string(respJSON))
-		log.Printf("Result length: %d bytes", len(resp.Result))
+		if resp.Collection != "" {
+			c.dispatchSubscription(SubscriptionEvent{
+				Collection: resp.Collection,
+				Fields:     resp.Fields,
+				Error:      resp.Error,
+			})
+			continue
+		}
+
+		log.Printf("Received response id=%s msg=%s result_bytes=%d", resp.ID, resp.Msg, len(resp.Result))
 
 		// Route response to the waiting caller
 		c.pendingMu.Lock()
@@ -265,22 +283,138 @@ func (c *Client) Authenticate() error {
 }
 
 func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, error) {
+	if err := c.ensureAuthenticated(); err != nil {
+		return nil, err
+	}
+
+	return c.callRaw(method, params...)
+}
+
+func (c *Client) ensureAuthenticated() error {
 	// Ensure connected and authenticated (serialized to prevent concurrent reconnects)
 	c.connMu.Lock()
 	if err := c.connect(); err != nil {
 		c.connMu.Unlock()
-		return nil, err
+		return err
 	}
 	needsAuth := !c.authenticated
 	c.connMu.Unlock()
 
 	if needsAuth {
 		if err := c.Authenticate(); err != nil {
-			return nil, fmt.Errorf("re-authentication failed: %w", err)
+			return fmt.Errorf("re-authentication failed: %w", err)
+		}
+	}
+	return nil
+}
+
+// DownloadFile executes a TrueNAS job that produces a downloadable file and
+// returns its contents. The download URL returned by core.download is
+// normally a short-lived, authenticated URL. If it is relative, it is
+// resolved against the configured TrueNAS endpoint.
+func (c *Client) DownloadFile(method string, args []interface{}, filename string) ([]byte, error) {
+	result, err := c.Call("core.download", method, args, filename, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create download job: %w", err)
+	}
+
+	downloadURL, err := parseDownloadURL(result)
+	if err != nil {
+		return nil, err
+	}
+
+	parsedURL, err := url.Parse(downloadURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse download URL: %w", err)
+	}
+	if !parsedURL.IsAbs() {
+		baseURL, err := c.httpBaseURL()
+		if err != nil {
+			return nil, err
+		}
+		parsedURL = baseURL.ResolveReference(parsedURL)
+	}
+
+	request, err := http.NewRequest(http.MethodGet, parsedURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create download request: %w", err)
+	}
+	request.Header.Set("Accept", "application/octet-stream")
+
+	// Some TrueNAS versions return a signed URL, while others require the
+	// API-key bearer header. Only send the key to the configured TrueNAS host.
+	if baseURL, baseErr := c.httpBaseURL(); baseErr == nil && sameHTTPHost(baseURL, parsedURL) {
+		request.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	httpClient := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: c.tlsConfig},
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("file download returned HTTP status %s", response.Status)
+	}
+
+	const maxDownloadBytes = 16 * 1024 * 1024
+	contents, err := io.ReadAll(io.LimitReader(response.Body, maxDownloadBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read downloaded file: %w", err)
+	}
+	if len(contents) > maxDownloadBytes {
+		return nil, fmt.Errorf("downloaded file exceeds the %d-byte safety limit", maxDownloadBytes)
+	}
+
+	return contents, nil
+}
+
+func parseDownloadURL(result json.RawMessage) (string, error) {
+	var values []json.RawMessage
+	if err := json.Unmarshal(result, &values); err == nil && len(values) >= 2 {
+		var downloadURL string
+		if err := json.Unmarshal(values[1], &downloadURL); err == nil && downloadURL != "" {
+			return downloadURL, nil
 		}
 	}
 
-	return c.callRaw(method, params...)
+	var response struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(result, &response); err == nil && response.URL != "" {
+		return response.URL, nil
+	}
+
+	return "", fmt.Errorf("core.download response did not contain a download URL")
+}
+
+func (c *Client) httpBaseURL() (*url.URL, error) {
+	endpoint := c.endpoint
+	if strings.HasPrefix(endpoint, "wss://") {
+		endpoint = "https://" + strings.TrimPrefix(endpoint, "wss://")
+	} else if !strings.HasPrefix(endpoint, "https://") {
+		endpoint = "https://" + endpoint
+	}
+
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid TrueNAS endpoint for HTTP download: %q", c.endpoint)
+	}
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed, nil
+}
+
+func sameHTTPHost(left, right *url.URL) bool {
+	return left != nil && right != nil &&
+		strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Host, right.Host)
 }
 
 // callRaw sends a request and waits for its response via the pending map.
@@ -342,8 +476,7 @@ func (c *Client) callRaw(method string, params ...interface{}) (json.RawMessage,
 			Params: params,
 		}
 
-		reqJSON, _ := json.Marshal(req)
-		log.Printf("Sending request: %s", string(reqJSON))
+		log.Printf("Sending request id=%s method=%s", id, method)
 
 		// writeMu ensures only one goroutine writes to the WebSocket at a time
 		c.writeMu.Lock()
@@ -426,10 +559,15 @@ func isConnectionError(err error) bool {
 
 func (c *Client) Close() error {
 	c.connMu.Lock()
-	defer c.connMu.Unlock()
 	c.authenticated = false
-	if c.conn != nil {
-		return c.conn.Close()
+	conn := c.conn
+	c.conn = nil
+	c.connMu.Unlock()
+
+	c.failSubscriptions(fmt.Errorf("TrueNAS client closed"))
+
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
@@ -437,14 +575,8 @@ func (c *Client) Close() error {
 // formatAPIError formats an API error into a readable error message
 func formatAPIError(apiErr *APIError) error {
 	errMsg := fmt.Sprintf("API error: %s (code %d)", apiErr.Message, apiErr.Code)
-	if apiErr.Trace != nil {
-		if traceStr, ok := apiErr.Trace.(string); ok && traceStr != "" {
-			errMsg = fmt.Sprintf("%s\nTrace: %s", errMsg, traceStr)
-		} else {
-			if traceJSON, err := json.MarshalIndent(apiErr.Trace, "", "  "); err == nil {
-				errMsg = fmt.Sprintf("%s\nTrace: %s", errMsg, string(traceJSON))
-			}
-		}
+	if summary := safeAPITraceSummary(apiErr.Trace); summary != "" {
+		errMsg += "\nDetails: " + summary
 	}
 	return fmt.Errorf("%s", errMsg)
 }
@@ -452,24 +584,31 @@ func formatAPIError(apiErr *APIError) error {
 // formatAPIErrorWithContext formats API error with request context for debugging
 func formatAPIErrorWithContext(apiErr *APIError, method string, params []interface{}) error {
 	errMsg := fmt.Sprintf("API error: %s (code %d)", apiErr.Message, apiErr.Code)
+	if summary := safeAPITraceSummary(apiErr.Trace); summary != "" {
+		errMsg += "\nDetails: " + summary
+	}
 
 	errMsg = fmt.Sprintf("%s\n\nRequest:\n  Method: %s", errMsg, method)
 
 	if len(params) > 0 {
-		if paramsJSON, err := json.MarshalIndent(params, "  ", "  "); err == nil {
+		if paramsJSON, err := json.MarshalIndent(redactAPIValue(params), "  ", "  "); err == nil {
 			errMsg = fmt.Sprintf("%s\n  Params: %s", errMsg, string(paramsJSON))
 		}
 	}
 
-	if apiErr.Trace != nil {
-		if traceStr, ok := apiErr.Trace.(string); ok && traceStr != "" {
-			errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, traceStr)
-		} else {
-			if traceJSON, err := json.MarshalIndent(apiErr.Trace, "", "  "); err == nil {
-				errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, string(traceJSON))
-			}
+	return fmt.Errorf("%s", errMsg)
+}
+
+func safeAPITraceSummary(trace interface{}) string {
+	traceMap, ok := trace.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	for _, key := range []string{"class", "repr"} {
+		if value, ok := traceMap[key].(string); ok && value != "" {
+			parts = append(parts, key+"="+value)
 		}
 	}
-
-	return fmt.Errorf("%s", errMsg)
+	return strings.Join(parts, ", ")
 }

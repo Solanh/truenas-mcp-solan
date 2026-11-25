@@ -21,8 +21,12 @@ type StdioHandler struct {
 
 // NewStdioHandler creates a new stdio handler
 func NewStdioHandler(debug bool) *StdioHandler {
+	scanner := bufio.NewScanner(os.Stdin)
+	// Keep proxy requests large enough for bounded base64 file uploads while
+	// retaining an explicit upper bound on a single JSON-RPC message.
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 	return &StdioHandler{
-		stdin: bufio.NewScanner(os.Stdin),
+		stdin: scanner,
 		debug: debug,
 	}
 }

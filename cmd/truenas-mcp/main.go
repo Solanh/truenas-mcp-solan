@@ -99,9 +99,14 @@ type StdioHandler struct {
 }
 
 func NewStdioHandler(registry mcp.ToolRegistry, debug bool) *StdioHandler {
+	scanner := bufio.NewScanner(os.Stdin)
+	// MCP tool arguments may contain base64-encoded private bundles. The
+	// default Scanner limit (~64 KiB) would terminate the process with
+	// "bufio.Scanner: token too long" before the JSON-RPC request is parsed.
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 	return &StdioHandler{
 		registry: registry,
-		stdin:    bufio.NewScanner(os.Stdin),
+		stdin:    scanner,
 		debug:    debug,
 	}
 }

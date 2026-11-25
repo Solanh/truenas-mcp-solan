@@ -729,7 +729,10 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 
 	// Call app.delete API
 	params := map[string]interface{}{
-		"remove_images": removeImages,
+		"remove_images":           removeImages,
+		"remove_ix_volumes":       boolArg(args, "remove_ix_volumes"),
+		"force_remove_ix_volumes": boolArg(args, "force_remove_ix_volumes"),
+		"force_remove_custom_app": boolArg(args, "force_remove_custom_app"),
 	}
 
 	result, err := client.Call("app.delete", appName, params)
@@ -764,13 +767,16 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 	}
 
 	response := map[string]interface{}{
-		"app_name":      appName,
-		"remove_images": removeImages,
-		"task_id":       task.TaskID,
-		"task_status":   task.Status,
-		"poll_interval": task.PollInterval,
-		"job_id":        jobID,
-		"message":       fmt.Sprintf("Deletion started. Track progress with tasks_get using task_id: %s", task.TaskID),
+		"app_name":                appName,
+		"remove_images":           removeImages,
+		"remove_ix_volumes":       boolArg(args, "remove_ix_volumes"),
+		"force_remove_ix_volumes": boolArg(args, "force_remove_ix_volumes"),
+		"force_remove_custom_app": boolArg(args, "force_remove_custom_app"),
+		"task_id":                 task.TaskID,
+		"task_status":             task.Status,
+		"poll_interval":           task.PollInterval,
+		"job_id":                  jobID,
+		"message":                 fmt.Sprintf("Deletion started. Track progress with tasks_get using task_id: %s", task.TaskID),
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")

@@ -37,6 +37,12 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Shows CPU/memory config, bootloader, devices (disks, NICs, displays), and current state
   - Automatically excludes sensitive data like display passwords for security
   - Perfect for questions like "what VMs are running?" or "show VMs with autostart enabled"
+- **find_vm_iso** - Find the first Ubuntu ISO in a TrueNAS directory in deterministic order
+- **create_vm** - Create a VM with configurable CPU, memory, sparse ZFS-backed disk, ISO, display, and VirtIO NIC
+  - Supports dry-run previews and rolls back a partially created VM if device setup fails
+  - Does not install the guest operating system or expose private keys
+- **start_vm** / **get_vm_console** - Start a VM and retrieve its interactive console descriptor
+- **vm_ssh_test** - Run a fixed 'printf codex-ssh-ok' probe using a local private-key path; arbitrary guest commands are not accepted
 
 ### Alerts
 - **list_alerts** - List system alerts with filtering
@@ -49,6 +55,14 @@ This document provides a comprehensive list of all available MCP tools for TrueN
 
 ### Applications
 - **query_apps** - List installed applications with status and available updates
+- **validate_custom_app** - Validate Docker Compose YAML and run read-only name/port preflight checks
+- **create_custom_app** - Create a custom Docker application from raw Compose YAML with dry-run support and task tracking
+- **update_custom_app** - Replace a custom app Compose definition
+- **redeploy_app** - Pull current images and restart an application
+- **get_custom_app_diagnostics** - Return redacted config, container, port, mount, and lifecycle-log diagnostics
+- **get_app_lifecycle_log** - Read and filter `/var/log/app_lifecycle.log` for failed app operations (read-only, requires `FULL_ADMIN`)
+- **get_app_container_logs** - Return a bounded, sanitized stdout/stderr tail for a selected app container
+- **wait_for_app_container_log** - Wait for a literal log marker with a bounded timeout and structured match state
 - **search_app_catalog** - Search TrueNAS app catalog by name, category, or keyword
   - Search across all catalog trains (stable, enterprise, community)
   - Filter by category (media, productivity, database, etc.)
